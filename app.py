@@ -1,6 +1,7 @@
-# app_no_plotly.py
+
+# app.py
 # Plotly-free Streamlit dashboard for Budget vs Actual expense analytics
-# Uses Streamlit native charts (Altair under the hood) + Pandas only.
+# Uses Streamlit native charts + Pandas only.
 
 import io
 from datetime import datetime
@@ -39,12 +40,10 @@ def inr(x: float) -> str:
     except Exception:
         return str(x)
 
-
 def pct(x: float) -> str:
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return "—"
     return f"{x*100:,.1f}%"
-
 
 def fy_month_start(mname: str, fy_start_year: int = 2025) -> pd.Timestamp:
     m = MONTH_MAP.get(str(mname).strip(), None)
@@ -53,7 +52,6 @@ def fy_month_start(mname: str, fy_start_year: int = 2025) -> pd.Timestamp:
     year = fy_start_year if m >= 4 else fy_start_year + 1
     return pd.Timestamp(year=year, month=m, day=1)
 
-
 def detect_header_row(excel_bytes: bytes, sheet: str, needle: str = "Month", search_rows: int = 60) -> int:
     raw = pd.read_excel(io.BytesIO(excel_bytes), sheet_name=sheet, header=None, engine="openpyxl")
     top = raw.iloc[: min(search_rows, len(raw))]
@@ -61,22 +59,20 @@ def detect_header_row(excel_bytes: bytes, sheet: str, needle: str = "Month", sea
     idx = np.where(mask.values)[0]
     return int(idx[0]) if len(idx) else 0
 
-
 @st.cache_data(show_spinner=False)
 def load_data(excel_bytes: bytes):
-    # Actual
+    # Actual sheet (header row auto-detect)
     h = detect_header_row(excel_bytes, "Actual", needle="Month")
     actual = pd.read_excel(io.BytesIO(excel_bytes), sheet_name="Actual", header=h, engine="openpyxl")
     actual = actual.loc[:, ~actual.columns.astype(str).str.contains(r"^Unnamed")]
     actual = actual.dropna(how="all")
 
-    # Budget
+    # Budget sheet (known header row = 2 in this file)
     budget = pd.read_excel(io.BytesIO(excel_bytes), sheet_name="Budget", header=2, engine="openpyxl")
     budget = budget.loc[:, ~budget.columns.astype(str).str.contains(r"^Unnamed")]
     budget = budget.dropna(how="all")
 
     return actual, budget
-
 
 def clean_actual(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -88,11 +84,10 @@ def clean_actual(df: pd.DataFrame) -> pd.DataFrame:
     df["Cost Centre"] = df.get("Cost Centers").astype(str)
     return df
 
-
 def clean_budget(df: pd.DataFrame):
     df = df.copy()
     if "Sr. No." in df.columns:
-        df = df[df["Sr. No."].notna()].copy()
+        df = df[df["Sr. No."].notna()].copy()  # remove totals/blank rows
 
     df["CompanyName"] = df["Company"].astype(str)
     df["GL Code"] = df["GL Code"].astype(str)
@@ -101,7 +96,6 @@ def clean_budget(df: pd.DataFrame):
         df["Plant/Ho"] = df["Plant/Ho"].replace({"Ho": "HO"})
 
     month_cols = [c for c in df.columns if isinstance(c, (pd.Timestamp, datetime))]
-
     long = df.melt(
         id_vars=[c for c in df.columns if c not in month_cols],
         value_vars=month_cols,
@@ -119,7 +113,6 @@ def clean_budget(df: pd.DataFrame):
 
     return long, mapping
 
-
 def build_combo(actual_enriched: pd.DataFrame, budget_long: pd.DataFrame) -> pd.DataFrame:
     keys = ["CompanyName", "Cost Centre", "GL Code", "MonthStart"]
     act = actual_enriched.groupby(keys, as_index=False)["Act. Costs"].sum()
@@ -132,9 +125,8 @@ def build_combo(actual_enriched: pd.DataFrame, budget_long: pd.DataFrame) -> pd.
     combo["VarPct"] = np.where(combo["BudgetCost"].abs() > 1e-9, combo["Variance"] / combo["BudgetCost"], np.nan)
     return combo
 
-
 # --------------------
-# UI - Sidebar
+# Sidebar / File loading
 # --------------------
 with st.sidebar:
     st.title("📊 Expense Dashboard")
@@ -157,7 +149,7 @@ actual_raw, budget_raw = load_data(excel_bytes)
 actual = clean_actual(actual_raw)
 budget_long, budget_map = clean_budget(budget_raw)
 
-# Budget constrained to actual month range
+# constrain budget to actual months
 min_m, max_m = actual["MonthStart"].min(), actual["MonthStart"].max()
 budget_long = budget_long[(budget_long["MonthStart"] >= min_m) & (budget_long["MonthStart"] <= max_m)]
 
@@ -165,13 +157,18 @@ actual_enriched = actual.merge(budget_map, on=["CompanyName", "Cost Centre", "GL
 combo = build_combo(actual_enriched, budget_long)
 combo = combo.merge(budget_map, on=["CompanyName", "Cost Centre", "GL Code"], how="left")
 
+# --------------------
+# Filters
+# --------------------
 with st.sidebar:
     page = st.radio("Navigate", ["Executive Summary", "Variance Explorer", "Trend & Mix", "Transactions", "Data Quality"], index=0)
 
     months = sorted(combo["MonthStart"].dropna().unique())
-    month_sel = st.slider("Month range", min_value=min(months), max_value=max(months), value=(min(months), max(months)), format="MMM YYYY")
+    month_sel = st.slider("Month range", min_value=min(months), max_value=max(months),
+                          value=(min(months), max(months)), format="MMM YYYY")
 
-    company_sel = st.multiselect("Company", sorted(combo["CompanyName"].dropna().unique()), default=sorted(combo["CompanyName"].dropna().unique()))
+    company_sel = st.multiselect("Company", sorted(combo["CompanyName"].dropna().unique()),
+                                 default=sorted(combo["CompanyName"].dropna().unique()))
     dept_sel = st.multiselect("Department", sorted(combo.get("Department", pd.Series(dtype=str)).dropna().unique()))
     ccmap_sel = st.multiselect("Category (CC Maping)", sorted(combo.get("CC Maping", pd.Series(dtype=str)).dropna().unique()))
     nature_sel = st.multiselect("Nature", sorted(combo.get("Nature", pd.Series(dtype=str)).dropna().unique()))
@@ -207,20 +204,17 @@ if page == "Executive Summary":
     c4.metric("Budget Utilization", pct(A / B) if abs(B) > 1e-9 else "—")
 
     st.divider()
-
-    m = cf.groupby("MonthStart", as_index=False)[["Act. Costs", "BudgetCost"]].sum().sort_values("MonthStart")
-    m = m.set_index("MonthStart")
+    m = cf.groupby("MonthStart", as_index=False)[["Act. Costs", "BudgetCost"]].sum().sort_values("MonthStart").set_index("MonthStart")
     st.subheader("Monthly Spend: Actual vs Budget")
     st.line_chart(m[["BudgetCost", "Act. Costs"]])
 
     st.divider()
-
     dim = breakdown_dim
     if dim in cf.columns:
-        top = cf.groupby(dim, as_index=False)[["Act. Costs", "BudgetCost", "Variance"]].sum().sort_values("Act. Costs", ascending=False).head(20)
+        top = cf.groupby(dim, as_index=False)[["Act. Costs", "BudgetCost", "Variance"]].sum() \
+                .sort_values("Act. Costs", ascending=False).head(20)
         st.subheader(f"Top 20 by Actual ({dim})")
         st.bar_chart(top.set_index(dim)["Act. Costs"])
-        st.caption("(Tip: Use Variance Explorer for detailed overspend/underspend ranking)")
         show = top.copy()
         show["Act. Costs"] = show["Act. Costs"].map(inr)
         show["BudgetCost"] = show["BudgetCost"].map(inr)
@@ -231,7 +225,6 @@ if page == "Executive Summary":
 
 elif page == "Variance Explorer":
     st.title("Variance Explorer")
-
     dim = breakdown_dim
     if dim not in cf.columns:
         st.warning("Selected breakdown dimension isn't available.")
@@ -259,7 +252,6 @@ elif page == "Variance Explorer":
         disp["VarPct"] = view["VarPct"].map(pct)
         st.dataframe(disp, use_container_width=True, height=420)
 
-        # Bar of variance
         st.subheader("Variance bar")
         st.bar_chart(view.set_index(dim)["Variance"])
 
@@ -268,12 +260,10 @@ elif page == "Variance Explorer":
         pivot = cf.pivot_table(index=dim, columns="MonthStart", values="Variance", aggfunc="sum", fill_value=0)
         top_rows = pivot.abs().sum(axis=1).sort_values(ascending=False).head(25).index
         pivot = pivot.loc[top_rows]
-        styled = pivot.style.background_gradient(cmap="RdBu", axis=None)
-        st.dataframe(styled, use_container_width=True, height=520)
+        st.dataframe(pivot.style.background_gradient(cmap="RdBu", axis=None), use_container_width=True, height=520)
 
 elif page == "Trend & Mix":
     st.title("Trend & Mix")
-
     dim = breakdown_dim
     if dim not in cf.columns:
         st.warning("Selected breakdown dimension isn't available.")
@@ -284,12 +274,10 @@ elif page == "Trend & Mix":
     t[dim] = np.where(t[dim].isin(topcats), t[dim], "Others")
     t = t.groupby(["MonthStart", dim], as_index=False)["Act. Costs"].sum()
 
-    # Area chart using pivot
     pv = t.pivot_table(index="MonthStart", columns=dim, values="Act. Costs", aggfunc="sum", fill_value=0).sort_index()
     st.subheader(f"Actual mix over time (Top 12 {dim} + Others)")
     st.area_chart(pv)
 
-    # Anomaly signals (z-score)
     st.subheader("Anomaly signals (z-score)")
     zdim = st.selectbox("Anomaly dimension", ["CC Maping", "Department", "GL Code"], index=0)
     if zdim in cf.columns:
@@ -326,11 +314,10 @@ elif page == "Transactions":
         act = act[mask]
 
     show_cols = [
-        "Month", "MonthStart", "CompanyName", "Plant", "Cost Centers", "Department", "Plant/HO", "GL", "Short text",
-        "Nature", "Group", "MIS MAPPING", "CC Maping", "Act. Costs",
+        "Month", "MonthStart", "CompanyName", "Plant", "Cost Centers", "Department",
+        "Plant/HO", "GL", "Short text", "Nature", "Group", "MIS MAPPING", "CC Maping", "Act. Costs"
     ]
     show_cols = [c for c in show_cols if c in act.columns]
-
     disp = act[show_cols].copy()
     disp["Act. Costs"] = disp["Act. Costs"].map(inr)
     st.dataframe(disp, use_container_width=True, height=560)
@@ -374,4 +361,4 @@ elif page == "Data Quality":
         mime="text/csv",
     )
 
-st.markdown("<div class='small-note'>No-Plotly build. If you fix Plotly installation, you can switch back to the richer Plotly version.</div>", unsafe_allow_html=True)
+st.markdown("<div class='small-note'>No-Plotly build. If you fix Plotly installation, you can switch back to richer visuals later.</div>", unsafe_allow_html=True)
